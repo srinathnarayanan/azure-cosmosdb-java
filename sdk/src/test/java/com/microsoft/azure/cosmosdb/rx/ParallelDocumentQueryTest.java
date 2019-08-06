@@ -23,6 +23,20 @@
 package com.microsoft.azure.cosmosdb.rx;
 
 import com.microsoft.azure.cosmosdb.BridgeInternal;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
+import org.testng.annotations.Factory;
+import org.testng.annotations.Test;
+
 import com.microsoft.azure.cosmosdb.Database;
 import com.microsoft.azure.cosmosdb.Document;
 import com.microsoft.azure.cosmosdb.DocumentClientException;
@@ -33,22 +47,11 @@ import com.microsoft.azure.cosmosdb.QueryMetrics;
 import com.microsoft.azure.cosmosdb.internal.routing.Range;
 import com.microsoft.azure.cosmosdb.rx.internal.Utils.ValueHolder;
 import com.microsoft.azure.cosmosdb.rx.internal.query.CompositeContinuationToken;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
-import org.testng.annotations.Factory;
-import org.testng.annotations.Test;
 import rx.Observable;
 import rx.observers.TestSubscriber;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
-
-import static org.assertj.core.api.Assertions.assertThat;
 
 public class ParallelDocumentQueryTest extends TestSuiteBase {
     private Database createdDatabase;
@@ -206,12 +209,16 @@ public class ParallelDocumentQueryTest extends TestSuiteBase {
         FeedOptions options = new FeedOptions();
         Observable<FeedResponse<Document>> queryObservable = client
                 .queryDocuments(getCollectionLink(), query, options);
+        List<Document> expectedDocs = createdDocuments;
 
-        FailureValidator validator = new FailureValidator.Builder()
-                .instanceOf(DocumentClientException.class)
-                .statusCode(400)
+        FeedResponseListValidator<Document> validator = new FeedResponseListValidator.Builder<Document>()
+                .totalSize(expectedDocs.size())
+                .exactlyContainsInAnyOrder(expectedDocs.stream().map(d -> d.getResourceId()).collect(Collectors.toList()))
+                .allPagesSatisfy(new FeedResponseValidator.Builder<Document>()
+                        .requestChargeGreaterThanOrEqualTo(1.0).build())
                 .build();
-        validateQueryFailure(queryObservable, validator);
+        
+        validateQuerySuccess(queryObservable, validator);
     }
 
     @Test(groups = { "simple" }, timeOut = 2 * TIMEOUT)
@@ -387,4 +394,31 @@ public class ParallelDocumentQueryTest extends TestSuiteBase {
 
         return receivedDocuments;
     }
+
+    @Test(groups = { "simple" }, timeOut = TIMEOUT)
+    public void unsupportedQueries() {
+        String aggregateWithoutValue = "SELECT COUNT(1) FROM c";
+        String compositeAggregate = "SELECT COUNT(1) + 5 FROM c";
+        String multipleAggregates = "SELECT COUNT(1) + SUM(c) FROM c";
+        List<String> unsupportedQueries = Arrays.asList(aggregateWithoutValue,
+                                                        compositeAggregate,
+                                                        multipleAggregates);
+        
+        unsupportedQueries.forEach(this::runUnsupportedQueryForFailures);
+    }
+    
+    private void runUnsupportedQueryForFailures(String query){
+        FeedOptions options = new FeedOptions();
+        options.setEnableCrossPartitionQuery(true);
+        options.setMaxDegreeOfParallelism(2);
+        Observable<FeedResponse<Document>> queryObservable = client.queryDocuments(getCollectionLink(),
+                                                                                   query,
+                                                                                   options);
+        FailureValidator validator = new FailureValidator.Builder()
+                .instanceOf(DocumentClientException.class)
+                .statusCode(400)
+                .build();
+        validateQueryFailure(queryObservable, validator);
+    }
+
 }
